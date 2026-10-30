@@ -12,7 +12,14 @@ $env:HOST='127.0.0.1';$env:PORT='5055';$env:GITD_ENABLE_IOS='0'
 $env:OPENAI_API_KEY='';$env:ANTHROPIC_API_KEY='';$env:OPENROUTER_API_KEY=''
 Push-Location $repo
 try{
-  & $python -c 'from gitd.app import app; from gitd.config import settings; assert settings.ios_platform_enabled is False; assert any(route.path == "/api/health" for route in app.routes); print("API import and health route: OK")'
+  $pythonCheck=@'
+from gitd.app import app
+from gitd.config import settings
+assert settings.ios_platform_enabled is False
+assert any(route.path == "/api/health" for route in app.routes)
+print("API import and health route: OK")
+'@
+  & $python -c $pythonCheck
   if($LASTEXITCODE -ne 0){throw 'ANDROID_AGENT_HEALTH=FAIL python_api_import'}
 }finally{Pop-Location}
 $index=Join-Path $repo 'frontend\dist\index.html'
