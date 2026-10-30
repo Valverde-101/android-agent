@@ -107,7 +107,8 @@ function effectiveStreamMode(serial: string, mode: 'rtc' | 'mjpeg'): 'rtc' | 'mj
   return isIosDevice(serial) ? 'mjpeg' : mode
 }
 
-function streamModeText(serial: string, mode: 'rtc' | 'mjpeg'): string {
+function streamModeText(serial: string, mode: 'rtc' | 'mjpeg' | 'h264'): string {
+  if (mode === 'h264') return 'H.264'
   if (mode === 'rtc') return 'WebRTC'
   return isIosDevice(serial) ? 'WDA MJPEG' : 'MJPEG'
 }
@@ -137,14 +138,16 @@ function streamInfoModeParam(serial: string, mode: 'rtc' | 'mjpeg'): string {
 }
 
 function streamInfoTitle(serial: string): string {
+  const mode = multiStreamMode.value[serial] || singleStreamMode.value
+  if (mode === 'h264') return 'GhostAgent H.264 low-latency stream'
   const info = streamInfo.value[serial]
-  if (!info) return streamModeTitle(serial, multiStreamMode.value[serial] || singleStreamMode.value)
+  if (!info) return streamModeTitle(serial, mode)
   const parts = [
     info.effective_mode ? `mode ${info.effective_mode}` : '',
     info.fallback_mode ? `fallback ${info.fallback_mode}` : '',
     info.unsupported_actions?.length ? `unsupported ${info.unsupported_actions.join(', ')}` : '',
   ].filter(Boolean)
-  return parts.join(' | ') || streamModeTitle(serial, multiStreamMode.value[serial] || singleStreamMode.value)
+  return parts.join(' | ') || streamModeTitle(serial, mode)
 }
 
 async function resolveMjpegStreamUrl(serial: string, mode: 'rtc' | 'mjpeg'): Promise<string> {

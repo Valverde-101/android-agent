@@ -12,6 +12,11 @@ __pycache__/
 *.db-wal
 *.db-shm
 
+# AndroidBuild local runtime and web-validation outputs
+.venv/
+.work/
+Logs/web-validation/
+
 # Data (runtime-generated)
 data/
 
@@ -34,7 +39,9 @@ reference/
 .DS_Store
 Thumbs.db
 *.egg-info/
+*.tsbuildinfo
 node_modules/
+frontend/dist/
 site/node_modules/
 site/dist/
 site/.astro/

@@ -1,0 +1,60 @@
+{
+  "schema": "androidbuild-project/v3",
+  "project": {
+    "id": "android-agent-workshop",
+    "kind": "web-service",
+    "adapter": "repo-hooks",
+    "repository": "Valverde-101/android-agent"
+  },
+  "workspace": {
+    "directory": ".work",
+    "retention_generations": 3,
+    "reuse_enabled": true,
+    "pools": ["build", "diagnostics", "evidence-staging"]
+  },
+  "cache": {
+    "enabled": true,
+    "global_content_addressed": true,
+    "repo_cache": true,
+    "native_build_cache": false,
+    "stage_fingerprints": {
+      "build": [
+        ".androidbuild.json",
+        ".github/scripts",
+        "pyproject.toml",
+        "requirements.lock",
+        "frontend/package-lock.json",
+        "frontend/src",
+        "frontend/vite.config.ts"
+      ]
+    }
+  },
+  "hooks": {
+    "precheck": ".github/scripts/web-precheck.ps1",
+    "build": ".github/scripts/web-build.ps1",
+    "health": ".github/scripts/web-health.ps1",
+    "smoke": ".github/scripts/web-smoke.ps1",
+    "functional": ".github/scripts/web-functional.ps1"
+  },
+  "delivery": { "mode": "web-validation" },
+  "physical": { "required": false },
+  "validation": { "required_web_hooks": ["health", "smoke", "functional"] },
+  "web": {
+    "toolchain": {
+      "python": "3.13.15",
+      "node": "24.19.0",
+      "npm": "11.17.0",
+      "npm_lock": "frontend/package-lock.json",
+      "python_lock": "requirements.lock",
+      "runtime_binding": "loopback-only",
+      "ios_agent": "disabled-until-configured"
+    }
+  },
+  "evidence": {
+    "raw_directory": ".work/evidence-staging",
+    "directory": "Logs/web-validation",
+    "keep_runs_global": 3
+  },
+  "timeouts": { "build_seconds": 3600, "functional_seconds": 900 },
+  "core": { "minimum_version": "3.0.44" }
+}
