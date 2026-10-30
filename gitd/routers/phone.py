@@ -10,9 +10,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from gitd.bots.common.device import get_device, is_ios_ref, list_configured_ios_devices
+from gitd.integrations.androidbuild_fastapi_lease import AndroidBuildLeaseRoute
 from gitd.models.base import get_db
 
-router = APIRouter(prefix="/api/phone", tags=["phone"])
+router = APIRouter(prefix="/api/phone", tags=["phone"], route_class=AndroidBuildLeaseRoute)
 
 _last_wifi_reconnect: float = 0
 

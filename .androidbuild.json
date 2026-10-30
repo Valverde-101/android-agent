@@ -21,6 +21,8 @@
       "build": [
         ".androidbuild.json",
         ".github/scripts",
+        "gitd",
+        "run.py",
         "pyproject.toml",
         "requirements.lock",
         "frontend/package-lock.json",

@@ -8,6 +8,7 @@
 - API and OpenAPI: `http://127.0.0.1:5055/docs`
 - Both services bind only to loopback. They are not part of Control Center LAN sharing.
 - Python and Node are taken from AndroidBuild's portable runtimes. The API uses the AndroidBuild SDK's `adb` through its local `PATH`.
+- Android Agent adds `platform-tools`, `emulator`, and SDK command-line tools from `ANDROID_SDK_ROOT` to the service/MCP process `PATH` at startup. This avoids stale PATH values in long-running Control Center launchers.
 - SQLite data and npm cache live under `V:\AndroidBuild\State\android-agent`. `.env` stays in this checkout and is ignored by Git; it contains a random admin token and local settings, not provider credentials.
 - Android is enabled. The optional iOS path remains disabled until Appium/WebDriverAgent is installed and configured.
 - No LLM provider is configured. The dashboard and device tools work without cloud keys; natural-language agent chat needs a provider login or local model configured separately.
@@ -18,8 +19,8 @@ The repository declares the AndroidBuild `web-service` / `web-validation` profil
 
 ## Device-action boundary
 
-Control Center owns installation, preparation, availability, and start/stop/restart. Codex connects to the local stdio MCP from this checkout; MCP tools that target an Android serial acquire the same `androidbuild-device-lease/v1` lock used by Core physical validation and release it after the tool call. This blocks MCP device actions while Core or another Control Center operation owns that device.
+Control Center owns installation, preparation, availability, and start/stop/restart. Codex connects to the local stdio MCP from this checkout; MCP tools and finite dashboard requests under `/api/phone` that identify an Android serial acquire the same `androidbuild-device-lease/v1` lock used by Core physical validation and release it after the operation. Inventory requests that don't target one serial remain unleased. Device actions without an explicit serial return HTTP `400`; the REST API returns HTTP `409` with `DEVICE_BUSY` if Core or another operation already owns the device.
 
-The Android Agent dashboard still runs its upstream ADB actions directly and does not yet acquire that lease. Do not run dashboard automation and Core physical validation against the same device at the same time. iOS remains disabled until Appium/WebDriverAgent and a separate iOS lease policy are configured.
+The adapter runs on loopback and uses the same lease files at `V:\AndroidBuild\DeviceTests\locks`; it does not proxy device actions through Video Studio. iOS remains disabled until Appium/WebDriverAgent and a separate iOS lease policy are configured.
 
-Codex configuration lives in the user's private `config.toml`, not in this public repository. All MCP tool calls use Codex's normal tool policy; CRM tools are disabled for this integration. The local launcher injects the portable Android SDK paths, so no API key is required for ADB control.
+Codex configuration lives in the user's private `config.toml`, not in this public repository. All MCP tool calls use Codex's normal tool policy; CRM tools are disabled for this integration. The MCP startup resolves the portable Android SDK paths from the configured SDK root, so no API key is required for ADB control.

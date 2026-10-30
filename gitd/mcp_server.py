@@ -19,6 +19,10 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from gitd.integrations.android_sdk_environment import configure_android_sdk_path
+
+configure_android_sdk_path()
+
 from gitd.bots.common.adb import Device
 from gitd.bots.common.device import (
     get_device,

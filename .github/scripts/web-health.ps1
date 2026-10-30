@@ -14,9 +14,12 @@ $pythonCheck=Join-Path ([string]$ctx.work_root) 'android-agent-core-health.py'
 $pythonSource=@'
 from gitd.app import app
 from gitd.config import settings
+from gitd.integrations.androidbuild_fastapi_lease import AndroidBuildLeaseRoute
+from gitd.routers.phone import router as phone_router
 assert settings.ios_platform_enabled is False
 assert any(route.path == "/api/health" for route in app.routes)
-print("API import and health route: OK")
+assert phone_router.routes and all(isinstance(route, AndroidBuildLeaseRoute) for route in phone_router.routes)
+print("API import, health route, and AndroidBuild lease routes: OK")
 '@
 Set-Content -LiteralPath $pythonCheck -Value $pythonSource -Encoding utf8
 Push-Location $repo
@@ -28,4 +31,4 @@ $index=Join-Path $repo 'frontend\dist\index.html'
 if(-not(Test-Path -LiteralPath $index -PathType Leaf)){throw 'ANDROID_AGENT_HEALTH=FAIL dashboard_artifact_missing'}
 $html=Get-Content -LiteralPath $index -Raw
 if($html -notmatch '<div id="app"'){throw 'ANDROID_AGENT_HEALTH=FAIL dashboard_entry_missing'}
-Write-Output 'ANDROID_AGENT_HEALTH=PASS api_import=PASS ios=disabled dashboard=present'
+Write-Output 'ANDROID_AGENT_HEALTH=PASS api_import=PASS core_device_lease=PASS ios=disabled dashboard=present'

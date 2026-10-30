@@ -11,7 +11,10 @@ $npmCli=Join-Path $androidBuildRoot 'Tools\Node\node-v24.19.0-win-x64\node_modul
 $required=@(
   '.androidbuild.json','requirements.lock','pyproject.toml','frontend\package-lock.json',
   'frontend\vite.config.ts','.github\scripts\web-build.ps1','.github\scripts\web-health.ps1',
-  '.github\scripts\web-smoke.ps1','.github\scripts\web-functional.ps1','gitd\app.py','gitd\cli.py'
+  '.github\scripts\web-smoke.ps1','.github\scripts\web-functional.ps1','gitd\app.py','gitd\cli.py',
+  'gitd\mcp_server.py','gitd\routers\phone.py',
+  'gitd\integrations\android_sdk_environment.py','gitd\integrations\androidbuild_device_lease.py',
+  'gitd\integrations\androidbuild_fastapi_lease.py'
 )
 foreach($relative in $required){if(-not(Test-Path -LiteralPath (Join-Path $repo $relative) -PathType Leaf)){throw "ANDROID_AGENT_PRECHECK=FAIL missing=$relative"}}
 if(-not(Test-Path -LiteralPath $python -PathType Leaf)){throw 'ANDROID_AGENT_PRECHECK=FAIL androidbuild_python_missing'}

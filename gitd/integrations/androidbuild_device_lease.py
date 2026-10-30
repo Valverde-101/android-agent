@@ -1,9 +1,9 @@
 """Adapter for AndroidBuild Core's shared physical-device lease files.
 
 Core and Control Center use ``DeviceTests/locks/<serial>.json`` to prevent a
-physical validation, console operation, or MCP tool call from using the same
-Android device concurrently. This module implements that on-disk contract so
-the stdio MCP can acquire and release a lease around each device-bound tool.
+physical validation, console operation, REST action, or MCP tool call from
+using the same Android device concurrently. This module implements that
+on-disk contract so Android Agent can lease device work consistently.
 """
 
 from __future__ import annotations
@@ -93,8 +93,13 @@ def _heartbeat(path: Path, lease_id: str) -> None:
 
 
 @contextmanager
-def androidbuild_device_lease(serial: str) -> Iterator[dict]:
-    """Hold Core's exclusive device lease while an MCP tool touches Android.
+def androidbuild_device_lease(
+    serial: str,
+    *,
+    repository: str = "android-agent/mcp",
+    run_id: str = "mcp-tool-call",
+) -> Iterator[dict]:
+    """Hold Core's exclusive device lease while Android Agent touches Android.
 
     Core's contract uses a create-new file (rather than a check-then-write), a
     900-second TTL, matching JSON fields, and owner-checked release. Active
@@ -119,8 +124,8 @@ def androidbuild_device_lease(serial: str) -> Iterator[dict]:
         "schema": "androidbuild-device-lease/v1",
         "lease_id": lease_id,
         "serial": serial,
-        "repository": "android-agent/mcp",
-        "run_id": "mcp-tool-call",
+        "repository": repository,
+        "run_id": run_id,
         "job_id": uuid.uuid4().hex,
         "runner": os.environ.get("COMPUTERNAME") or socket.gethostname(),
         "tested_sha": "",

@@ -9,6 +9,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from gitd.integrations.android_sdk_environment import configure_android_sdk_path
+
+# Child processes (ADB, emulator and SDK tools) must use the SDK selected for
+# this installation even when a long-running service inherited a stale PATH.
+configure_android_sdk_path()
+
 from gitd.models.base import Base, engine
 from gitd.routers.agent_chat import router as agent_chat_router
 from gitd.routers.benchmarks import router as benchmarks_router
