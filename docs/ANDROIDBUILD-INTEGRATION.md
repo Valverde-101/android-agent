@@ -18,4 +18,8 @@ The repository declares the AndroidBuild `web-service` / `web-validation` profil
 
 ## Device-action boundary
 
-Control Center owns installation, preparation, availability, and start/stop/restart. Once a user opens Android Agent and starts a device task, the upstream agent sends ADB commands itself. It does not acquire AndroidBuild's physical-device build/validation lease. Keep a phone exclusive to Android Agent while a task is running; the Core lease bridge and direct Codex MCP registration are intentionally not enabled in this integration.
+Control Center owns installation, preparation, availability, and start/stop/restart. Codex connects to the local stdio MCP from this checkout; MCP tools that target an Android serial acquire the same `androidbuild-device-lease/v1` lock used by Core physical validation and release it after the tool call. This blocks MCP device actions while Core or another Control Center operation owns that device.
+
+The Android Agent dashboard still runs its upstream ADB actions directly and does not yet acquire that lease. Do not run dashboard automation and Core physical validation against the same device at the same time. iOS remains disabled until Appium/WebDriverAgent and a separate iOS lease policy are configured.
+
+Codex configuration lives in the user's private `config.toml`, not in this public repository. All MCP tool calls use Codex's normal tool policy; CRM tools are disabled for this integration. The local launcher injects the portable Android SDK paths, so no API key is required for ADB control.

@@ -11,6 +11,8 @@ import json
 import re
 import subprocess
 import sys
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -25,6 +27,7 @@ from gitd.bots.common.device import (
     list_connected_device_refs,
 )
 from gitd.services.agent_tools import SAFE_DEVICE_TOOLS
+from gitd.integrations.androidbuild_device_lease import androidbuild_device_lease
 from gitd.services.tool_platforms import platform_error_text, supports_platform
 from gitd.skills.platforms import (
     skill_platform_error_text,
@@ -34,12 +37,46 @@ from gitd.skills.platforms import (
 
 mcp = FastMCP(
     "android-agent",
+    instructions=(
+        "Use list_devices to choose a connected Android serial. Inspect a screenshot or UI elements before acting. "
+        "Every device-scoped tool acquires AndroidBuild Core's exclusive device lease; if it returns DEVICE_BUSY, "
+        "stop and retry after the current operation finishes. Do not bypass the lease or run dashboard automation "
+        "against the same device during Core validation. iOS is disabled until a separate lease bridge is configured."
+    ),
     stateless_http=True,
     json_response=True,
     host="127.0.0.1",
     port=8002,
     streamable_http_path="/mcp",
 )
+
+
+def _androidbuild_mcp_tool():
+    """Register a tool while sharing AndroidBuild Core's physical-device lease.
+
+    Every MCP tool that accepts a device serial holds the same lease file used by
+    AndroidBuild physical validation for the duration of the call. This prevents
+    MCP-driven ADB actions and Core validation from operating on one device at once.
+    """
+    register_tool = mcp.tool()
+
+    def register(function):
+        parameters = signature(function).parameters
+        if "device" not in parameters:
+            return register_tool(function)
+
+        @wraps(function)
+        def leased_call(*args, **kwargs):
+            bound = signature(function).bind_partial(*args, **kwargs)
+            device = bound.arguments.get("device")
+            if not device:
+                return function(*args, **kwargs)
+            with androidbuild_device_lease(str(device)):
+                return function(*args, **kwargs)
+
+        return register_tool(leased_call)
+
+    return register
 
 
 def _ios_unsupported(tool_name: str) -> str:
@@ -102,7 +139,7 @@ def _format_ios_device(serial: str, details: dict | None) -> str:
 # ── Tier 1: Device Control ────────────────────────────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_devices() -> str:
     """List connected Android ADB devices and configured iOS Appium devices.
     Call this first to get the device serial you need for other tools."""
@@ -127,7 +164,7 @@ def list_devices() -> str:
     return "\n".join(result)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def screenshot(device: str) -> str:
     """Take a screenshot of the device screen. Returns a base64-encoded JPEG.
     Use this to SEE what's on screen before deciding what to tap.
@@ -143,7 +180,7 @@ def screenshot(device: str) -> str:
     return _screenshot(device)["image"]
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_elements(device: str, interactive_only: bool = True) -> str:
     """Get all UI elements on the current screen as a JSON array.
     Each element has: idx, text, content_desc, resource_id, class, bounds, center, clickable, scrollable.
@@ -153,14 +190,14 @@ def get_elements(device: str, interactive_only: bool = True) -> str:
     return json.dumps(get_interactive_elements(device, interactive_only=interactive_only), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def tap(device: str, x: int, y: int) -> str:
     """Tap at exact pixel coordinates (x, y) on the device screen."""
     get_device(device).tap(x, y)
     return f"Tapped ({x}, {y})"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def tap_element(device: str, idx: int) -> str:
     """Tap a UI element by its index from get_elements().
     Call get_elements() first to see what's on screen and get element indices."""
@@ -177,7 +214,7 @@ def tap_element(device: str, idx: int) -> str:
     return f"Tapped element #{idx} at ({cx}, {cy})"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def swipe(device: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 500) -> str:
     """Swipe from (x1,y1) to (x2,y2). Use for scrolling, pulling down notifications, etc.
     Common patterns: scroll down = swipe(dev, 540, 1400, 540, 600)
@@ -186,7 +223,7 @@ def swipe(device: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 50
     return f"Swiped ({x1},{y1}) -> ({x2},{y2}) in {duration_ms}ms"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def type_text(device: str, text: str) -> str:
     """Type text into the currently focused input field.
     Tap an input field first to focus it. Spaces are supported.
@@ -204,7 +241,7 @@ def type_text(device: str, text: str) -> str:
     return f"Typed: {typed}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def type_unicode(device: str, text: str) -> str:
     """Type unicode text into the focused field.
     Android uses ADBKeyboard when configured; iOS uses WDA text entry.
@@ -216,14 +253,14 @@ def type_unicode(device: str, text: str) -> str:
     return f"Typed (unicode): {text}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def press_back(device: str) -> str:
     """Press Back on Android or the best available iOS browser/navigation back action."""
     get_device(device).back()
     return "Pressed Back"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def press_home(device: str) -> str:
     """Press the platform Home button. Returns to the home screen."""
     if is_ios_ref(device):
@@ -233,7 +270,7 @@ def press_home(device: str) -> str:
     return "Pressed Home"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def press_key(device: str, key: str) -> str:
     """Send a platform key event.
     Android accepts KEYCODE_* names, with the KEYCODE_ prefix added automatically.
@@ -248,7 +285,7 @@ def press_key(device: str, key: str) -> str:
     return f"Sent {key}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def launch_app(device: str, package: str, fresh: bool = False) -> str:
     """Launch an app by Android package name or iOS bundle id. Use search_apps() to find it.
 
@@ -267,7 +304,7 @@ def launch_app(device: str, package: str, fresh: bool = False) -> str:
     return execute_tool("launch_app", {"device": device, "package": package, "fresh": fresh})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def force_stop(device: str, package: str) -> str:
     """Force-stop an Android package or terminate an iOS bundle id."""
     from gitd.services.agent_tools import execute_tool
@@ -275,7 +312,7 @@ def force_stop(device: str, package: str) -> str:
     return execute_tool("force_stop", {"device": device, "package": package})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def app_state(device: str, package: str) -> str:
     """Check whether an Android package or iOS bundle id is installed, running, or foreground."""
     from gitd.services.device_context import app_state as _app_state
@@ -283,7 +320,7 @@ def app_state(device: str, package: str) -> str:
     return json.dumps(_app_state(device, package), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def open_camera(device: str, mode: str = "photo", timer_s: int = 0) -> str:
     """Open the platform camera app in a specific mode.
 
@@ -306,7 +343,7 @@ def open_camera(device: str, mode: str = "photo", timer_s: int = 0) -> str:
     return execute_tool("open_camera", {"device": device, "mode": mode, "timer_s": timer_s})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def speak_text(device: str, text: str, rate: float = 1.0) -> str:
     """Make the phone speak text aloud using its built-in TTS engine.
 
@@ -325,7 +362,7 @@ def speak_text(device: str, text: str, rate: float = 1.0) -> str:
     return _speak(device, text, rate)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def search_apps(device: str, query: str) -> str:
     """Search installed apps by name. Case-insensitive. Returns Android packages or iOS bundle ids.
     Example: search_apps('tiktok') → [{"name": "TikTok", "package": "com.zhiliaoapp.musically"}]"""
@@ -334,7 +371,7 @@ def search_apps(device: str, query: str) -> str:
     return execute_tool("search_apps", {"device": device, "query": query})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_apps(device: str) -> str:
     """List installed apps with human-readable names and package names or bundle ids.
     iOS is limited to configured/common bundle ids verified through Appium."""
@@ -343,7 +380,7 @@ def list_apps(device: str) -> str:
     return execute_tool("list_apps", {"device": device})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_packages(device: str) -> str:
     """List raw Android package names or iOS bundle ids. Prefer list_apps() for display names."""
     from gitd.services.agent_tools import execute_tool
@@ -351,14 +388,14 @@ def list_packages(device: str) -> str:
     return execute_tool("list_packages", {"device": device})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def long_press(device: str, x: int, y: int, duration_ms: int = 1000) -> str:
     """Long press at coordinates. Use for context menus, drag initiation, etc."""
     get_device(device).long_press(x, y, duration_ms=duration_ms)
     return f"Long pressed ({x}, {y}) for {duration_ms}ms"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_phone_state(device: str) -> str:
     """Get current app, activity, keyboard state, and focused element.
     Quick way to check what app/screen the device is on without parsing full elements."""
@@ -367,7 +404,7 @@ def get_phone_state(device: str) -> str:
     return json.dumps(_get_state(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def device_health(device: str) -> str:
     """Run a comprehensive device health check.
     iOS includes Appium/WDA status, active session details, and recovery steps."""
@@ -376,7 +413,7 @@ def device_health(device: str) -> str:
     return json.dumps(_device_health(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def fix_device_health(device: str, issue: str) -> str:
     """Apply a recovery action returned by device_health.recommended_fix."""
     from gitd.services.device_context import fix_device_health as _fix_device_health
@@ -387,7 +424,7 @@ def fix_device_health(device: str, issue: str) -> str:
 # ── Tier 1.5: Context Extraction ────────────────────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_screen_tree(device: str) -> str:
     """Get an LLM-friendly indented UI hierarchy of the current screen.
     Each node shows: [idx] ClassName "label" [clickable] [x1,y1][x2,y2].
@@ -398,7 +435,7 @@ def get_screen_tree(device: str) -> str:
     return _tree(device)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_screen_xml(device: str) -> str:
     """Get the raw normalized UI XML dump from the device.
     Android returns uiautomator XML; iOS returns normalized Appium/WDA XML.
@@ -409,7 +446,7 @@ def get_screen_xml(device: str) -> str:
     return _xml(device)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def screenshot_annotated(device: str) -> str:
     """Take a screenshot with numbered element labels overlaid on interactive elements.
     The numbers correspond to element indices from get_elements().
@@ -421,7 +458,7 @@ def screenshot_annotated(device: str) -> str:
     return result.get("image", "")
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def screenshot_cropped(device: str, x1: int, y1: int, x2: int, y2: int) -> str:
     """Take a screenshot of a specific region of the screen.
     Coordinates are in device pixels. Use this to zoom in on a specific area
@@ -432,7 +469,7 @@ def screenshot_cropped(device: str, x1: int, y1: int, x2: int, y2: int) -> str:
     return result.get("image", "")
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def start_screen_recording(device: str, filename: str = "") -> str:
     """Start recording the device screen.
 
@@ -443,7 +480,7 @@ def start_screen_recording(device: str, filename: str = "") -> str:
     return json.dumps(start_recording(device, filename=filename), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def stop_screen_recording(device: str) -> str:
     """Stop a running device screen recording and save the MP4."""
     from gitd.services.phone_recording import stop_recording
@@ -451,7 +488,7 @@ def stop_screen_recording(device: str) -> str:
     return json.dumps(stop_recording(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def screen_recording_status(device: str) -> str:
     """Return active screen recording status for a device."""
     from gitd.services.phone_recording import recording_status
@@ -459,7 +496,7 @@ def screen_recording_status(device: str) -> str:
     return json.dumps(recording_status(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_stream_info(device: str, mode: str = "mjpeg", fps: int = 5, quality: int = 8) -> str:
     """Return effective stream metadata without opening the stream.
 
@@ -471,7 +508,7 @@ def get_stream_info(device: str, mode: str = "mjpeg", fps: int = 5, quality: int
     return json.dumps(phone_stream_info(device=device, mode=mode, fps=fps, quality=quality), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def ocr_screen(device: str) -> str:
     """OCR the entire device screen using RapidOCR. Returns all visible text with positions.
     Use this when UI elements are rendered as images/canvas (e.g., analytics dashboards,
@@ -482,7 +519,7 @@ def ocr_screen(device: str) -> str:
     return json.dumps(_ocr(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def ocr_region(device: str, x1: int, y1: int, x2: int, y2: int) -> str:
     """OCR a specific region of the screen. Coordinates in device pixels.
     More accurate than full-screen OCR for targeted text extraction.
@@ -492,7 +529,7 @@ def ocr_region(device: str, x1: int, y1: int, x2: int, y2: int) -> str:
     return json.dumps(_ocr(device, x1, y1, x2, y2), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def classify_screen(device: str) -> str:
     """Classify the current screen: what app, what type of screen (home, search, profile,
     settings, dialog, error, loading), keyboard state. No LLM needed — uses XML heuristics.
@@ -502,7 +539,7 @@ def classify_screen(device: str) -> str:
     return json.dumps(_cls(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def toggle_overlay(device: str, visible: bool = True) -> str:
     """Toggle the numbered element overlay on the device screen.
     When on, interactive elements get visible numbered labels that match get_elements() indices.
@@ -515,7 +552,7 @@ def toggle_overlay(device: str, visible: bool = True) -> str:
     return f"Overlay {'enabled' if visible else 'disabled'}" if ok else "Failed — Portal not available"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def clipboard_get(device: str) -> str:
     """Get the current clipboard text from the device."""
     from gitd.services.device_context import clipboard_get as _get
@@ -523,7 +560,7 @@ def clipboard_get(device: str) -> str:
     return _get(device) or "(empty)"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def clipboard_set(device: str, text: str) -> str:
     """Set clipboard text on the device. Use with press_key(PASTE) to paste into fields."""
     from gitd.services.device_context import clipboard_set as _set
@@ -531,7 +568,7 @@ def clipboard_set(device: str, text: str) -> str:
     return "Clipboard set" if _set(device, text) else "Failed"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def paste_text(device: str, text: str) -> str:
     """Set clipboard text and immediately paste it into the currently focused field.
     Equivalent to clipboard_set + press_key(PASTE) in one call.
@@ -548,7 +585,7 @@ def paste_text(device: str, text: str) -> str:
     return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_notifications(device: str) -> str:
     """Get active notifications. Returns JSON array of {package, title, text}."""
     from gitd.services.device_context import get_notifications as _notif
@@ -556,7 +593,7 @@ def get_notifications(device: str) -> str:
     return json.dumps(_notif(device), indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def open_notifications(device: str) -> str:
     """Pull down the notification shade or iOS Notification Center."""
     from gitd.services.device_context import open_notifications as _open
@@ -566,7 +603,7 @@ def open_notifications(device: str) -> str:
     return "Notification Center opened" if is_ios_ref(device) else "Notification shade opened"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def clear_notifications(device: str) -> str:
     """Dismiss visible notifications when the platform exposes a clear control."""
     from gitd.services.device_context import clear_notifications as _clear
@@ -574,7 +611,7 @@ def clear_notifications(device: str) -> str:
     return "Notifications cleared" if _clear(device) else "Failed"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def web_search(device: str, query: str, engine: str = "google", bundle_id: str = "") -> str:
     """Open a web search in whatever browser is on the device.
 
@@ -600,7 +637,7 @@ def web_search(device: str, query: str, engine: str = "google", bundle_id: str =
     return open_search(device, query, engine=engine)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def open_url(device: str, url: str, bundle_id: str = "") -> str:
     """Open a URL in the platform browser.
 
@@ -613,7 +650,7 @@ def open_url(device: str, url: str, bundle_id: str = "") -> str:
     return dumps(_open_url(device, url, bundle_id=bundle_id or None))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def browser_back(device: str) -> str:
     """Navigate back in the current browser/app context."""
     from gitd.services.browser import browser_back as _browser_back
@@ -622,7 +659,7 @@ def browser_back(device: str) -> str:
     return dumps(_browser_back(device))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_current_url(device: str) -> str:
     """Get the current browser URL when the platform exposes it."""
     if not supports_platform("get_current_url", _device_platform(device)):
@@ -633,7 +670,7 @@ def get_current_url(device: str) -> str:
     return dumps(_get_current_url(device))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def wait_for_text(device: str, text: str, timeout: float = 12.0) -> str:
     """Wait until text appears on screen and return visible text context."""
     from gitd.services.browser import dumps
@@ -642,7 +679,7 @@ def wait_for_text(device: str, text: str, timeout: float = 12.0) -> str:
     return dumps(_wait_for_text(device, text, timeout=timeout))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def extract_visible_text(device: str, max_lines: int = 200, include_controls: bool = False) -> str:
     """Extract visible text from the current screen with browser chrome filtered by default."""
     from gitd.services.browser import dumps
@@ -651,7 +688,7 @@ def extract_visible_text(device: str, max_lines: int = 200, include_controls: bo
     return dumps(_extract_visible_text(device, max_lines=max_lines, include_controls=include_controls))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def extract_articles(device: str, max_items: int = 5) -> str:
     """Extract likely visible article/headline candidates from the current browser page."""
     from gitd.services.browser import dumps
@@ -660,7 +697,7 @@ def extract_articles(device: str, max_items: int = 5) -> str:
     return dumps(_extract_articles(device, max_items=max_items))
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def read_news(
     device: str,
     url: str = "https://text.npr.org/",
@@ -692,7 +729,7 @@ def read_news(
     )
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def launch_intent(device: str, action: str = "", data: str = "", package: str = "", extras: str = "{}") -> str:
     """Launch a full Android intent. More powerful than launch_app().
     Examples:
@@ -707,7 +744,7 @@ def launch_intent(device: str, action: str = "", data: str = "", package: str = 
     return _intent(device, action=action, data=data, package=package, extras=parsed_extras)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def find_on_screen(device: str, text: str) -> str:
     """Find specific text on the screen and return its location.
     Searches XML elements first (fast), falls back to OCR if not found.
@@ -722,7 +759,7 @@ def find_on_screen(device: str, text: str) -> str:
 # ── Tier 2: Skill Workflows ─────────────────────────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_skills(device: str = "", supported_only: bool = False) -> str:
     """List all installed mobile automation skills with their actions, workflows, and platform support.
     Use this to discover what high-level automations are available.
@@ -777,7 +814,7 @@ def list_skills(device: str = "", supported_only: bool = False) -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def run_workflow(device: str, skill: str, workflow: str, params: str = "{}") -> str:
     """Run an installed skill workflow on the device.
 
@@ -825,7 +862,7 @@ def run_workflow(device: str, skill: str, workflow: str, params: str = "{}") -> 
     return f"SUCCESS:\n{output}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def run_action(device: str, skill: str, action: str, params: str = "{}") -> str:
     """Run a single skill action on the device.
 
@@ -950,7 +987,7 @@ def _run_flow(device: str, steps: object) -> dict:
     }
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def run_flow(device: str, steps: str) -> str:
     """Run an ordered batch of tool calls server-side in ONE round-trip.
 
@@ -1082,7 +1119,7 @@ def _parse_crashes(logcat_text: str) -> list[dict]:
     return crashes
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_crashes(device: str, package: str = "", limit: int = 10) -> str:
     """List recent app crashes and ANRs (from the logcat crash buffer, no root).
 
@@ -1106,7 +1143,7 @@ def list_crashes(device: str, package: str = "", limit: int = 10) -> str:
     return json.dumps({"count": len(out), "crashes": out}, indent=2)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def get_crash(device: str, package: str = "") -> str:
     """Return the full stack trace of the MOST RECENT crash (from the crash buffer).
 
@@ -1131,7 +1168,7 @@ def get_crash(device: str, package: str = "") -> str:
 # ── Tier 3: Meta / Discovery ────────────────────────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def wait(seconds: float = 2.0) -> str:
     """Pause execution for a fixed number of seconds."""
     from gitd.services.agent_tools import execute_tool
@@ -1139,7 +1176,7 @@ def wait(seconds: float = 2.0) -> str:
     return execute_tool("wait", {"seconds": seconds})
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def explore_app(device: str, package: str, max_depth: int = 2, max_states: int = 10) -> str:
     """Explore an app's UI autonomously using BFS.
     Launches the app, taps every interactive element, builds a state graph.
@@ -1174,7 +1211,7 @@ def explore_app(device: str, package: str, max_depth: int = 2, max_states: int =
     return f"Exploration finished. Output:\n{output}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def create_skill(
     name: str,
     app_package: str,
@@ -1213,7 +1250,7 @@ def create_skill(
     return result["message"]
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def draft_skill(device: str) -> str:
     """Distil the device's most recent chat conversation into draft replayable steps for a HARD skill.
 
@@ -1230,7 +1267,7 @@ def draft_skill(device: str) -> str:
         return f"ERROR: {e}"
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def save_skill(
     device: str,
     name: str,
@@ -1268,7 +1305,7 @@ def save_skill(
 # ── Lead / influencer lookups (for marketing agents) ────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def lookup_lead(handle: str) -> str:
     """Get the full fact sheet for one influencer lead by handle.
 
@@ -1285,7 +1322,7 @@ def lookup_lead(handle: str) -> str:
     return _lookup_lead(handle)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def list_unread_leads() -> str:
     """List every influencer with an unread reply in the inbox, sorted by recency.
 
@@ -1301,7 +1338,7 @@ def list_unread_leads() -> str:
 # ── Local CRM lookups ────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def crm_lookup_contact(handle: str) -> str:
     """Get the stored fact sheet for one local CRM contact by handle. Read-only.
 
@@ -1316,7 +1353,7 @@ def crm_lookup_contact(handle: str) -> str:
     return _lookup(handle)
 
 
-@mcp.tool()
+@_androidbuild_mcp_tool()
 def crm_list_unread_messages() -> str:
     """List local CRM contacts with unread messages, sorted by recency. Read-only.
 
