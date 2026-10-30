@@ -29,10 +29,10 @@ $apiPort2=Get-FreeLoopbackPort
 while($apiPort2 -eq $apiPort){$apiPort2=Get-FreeLoopbackPort}
 $db=Join-Path ([string]$ctx.work_root) ("android-agent-{0}-{1}.db" -f $Mode,[guid]::NewGuid().ToString('N'))
 $saved=@{}
-foreach($key in @('DB_PATH','HOST','PORT','GITD_ENABLE_IOS','GITD_CORS_ORIGINS','ANDROID_AGENT_API_TARGET','OPENAI_API_KEY','ANTHROPIC_API_KEY','OPENROUTER_API_KEY')){$saved[$key]=[Environment]::GetEnvironmentVariable($key,'Process')}
+foreach($key in @('DB_PATH','HOST','PORT','PYTHONUTF8','GITD_ENABLE_IOS','GITD_CORS_ORIGINS','ANDROID_AGENT_API_TARGET','OPENAI_API_KEY','ANTHROPIC_API_KEY','OPENROUTER_API_KEY')){$saved[$key]=[Environment]::GetEnvironmentVariable($key,'Process')}
 $api=$null;$ui=$null
 try{
-  $env:DB_PATH=$db;$env:HOST='127.0.0.1';$env:PORT=[string]$apiPort;$env:GITD_ENABLE_IOS='0'
+  $env:DB_PATH=$db;$env:HOST='127.0.0.1';$env:PORT=[string]$apiPort;$env:PYTHONUTF8='1';$env:GITD_ENABLE_IOS='0'
   $env:ANDROID_AGENT_API_TARGET="http://127.0.0.1:$apiPort"
   $env:GITD_CORS_ORIGINS="http://127.0.0.1:$apiPort2,http://localhost:$apiPort2"
   $env:OPENAI_API_KEY='';$env:ANTHROPIC_API_KEY='';$env:OPENROUTER_API_KEY=''
