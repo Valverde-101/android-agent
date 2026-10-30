@@ -8,4 +8,6 @@ import uvicorn
 from gitd.app import app
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=5055)
+    # This service is a local control surface for a user's Android devices;
+    # do not expose ADB/automation endpoints to the LAN by default.
+    uvicorn.run(app, host='127.0.0.1', port=5055)

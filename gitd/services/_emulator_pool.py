@@ -7,6 +7,7 @@ Extracted from emulator_service.py. Uses EmulatorManager for lifecycle ops.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -16,7 +17,7 @@ try:
 except ImportError:
     psutil = None
 
-from gitd.services._emulator_helpers import EmulatorConfig
+from gitd.services._emulator_helpers import AVD_HOME, EmulatorConfig, SDK_ROOT
 
 if TYPE_CHECKING:
     from gitd.services.emulator_service import EmulatorManager
@@ -29,6 +30,19 @@ class EmulatorPool:
 
     def __init__(self, manager: EmulatorManager, max_concurrent: int = 20):
         self.manager = manager
+        # Twenty concurrent AVDs is unsafe on a workstation. Scale a modest
+        # default from host RAM/CPU and let an explicit local setting override it.
+        configured = os.environ.get("GITD_MAX_EMULATORS", "").strip()
+        try:
+            override = int(configured) if configured else 0
+        except ValueError:
+            override = 0
+        if override > 0:
+            max_concurrent = min(20, override)
+        elif psutil:
+            ram_slots = max(1, int(psutil.virtual_memory().total / (8 * 1024**3)))
+            cpu_slots = max(1, int((psutil.cpu_count() or 4) / 4))
+            max_concurrent = min(20, ram_slots, cpu_slots)
         self.max_concurrent = max_concurrent
         self._pool: dict[str, dict] = {}  # serial -> {name, status, current_job}
         self._lock = threading.Lock()
@@ -51,8 +65,20 @@ class EmulatorPool:
 
     def resource_usage(self) -> dict:
         """Current system resource usage."""
+        if psutil is None:
+            return {
+                "cpu_count": 0,
+                "cpu_percent": 0,
+                "ram_total_gb": 0,
+                "ram_used_gb": 0,
+                "ram_available_gb": 0,
+                "disk_total_gb": 0,
+                "disk_free_gb": 0,
+            }
         mem = psutil.virtual_memory()
-        disk = psutil.disk_usage(str(Path.home()))
+        # The Android SDK/AVDs may live on a project drive rather than C:.
+        data_path = SDK_ROOT or AVD_HOME
+        disk = psutil.disk_usage(str(data_path if data_path.exists() else Path.home()))
         return {
             "cpu_count": psutil.cpu_count(),
             "cpu_percent": psutil.cpu_percent(interval=0.1),

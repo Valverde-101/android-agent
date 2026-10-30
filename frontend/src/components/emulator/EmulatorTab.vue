@@ -128,7 +128,7 @@ onUnmounted(() => {
 
     <!-- Prerequisites warning -->
     <div
-      v-if="store.prerequisites && !store.prerequisites.emulator_binary"
+      v-if="store.prerequisites && store.prerequisites.backend === 'native' && !store.prerequisites.emulator_binary"
       class="card mb-4 px-4 py-3"
       style="border-color: #ef4444; background: #ef444410"
     >
@@ -147,6 +147,23 @@ onUnmounted(() => {
       <div class="text-sm font-semibold" style="color: #f59e0b">Hardware Acceleration Not Available</div>
       <div class="text-xs mt-1" style="color: var(--text-3)">
         {{ store.prerequisites.hw_accel_type }} not available. Emulators will run without hardware acceleration (very slow).
+      </div>
+    </div>
+
+    <div v-if="store.prerequisites" class="card mb-4 px-4 py-3">
+      <div class="text-sm font-semibold" style="color: var(--text-1)">
+        Emulator backend: {{ store.prerequisites.backend_label || store.prerequisites.backend }}
+      </div>
+      <div class="text-xs mt-1" style="color: var(--text-3)">
+        {{ store.prerequisites.hw_accel
+          ? `${store.prerequisites.hw_accel_type} acceleration is available.`
+          : (store.prerequisites.hw_accel_detail || `${store.prerequisites.hw_accel_type} acceleration is not available.`) }}
+        <span v-if="store.prerequisites.backend === 'native' && store.prerequisites.docker_available">
+          Docker is installed for other container workloads; Android emulators use the native SDK on this Windows host.
+        </span>
+        <span v-else-if="store.prerequisites.backend === 'native'">
+          Android emulators use the native SDK on this Windows host.
+        </span>
       </div>
     </div>
 

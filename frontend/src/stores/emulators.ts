@@ -21,13 +21,18 @@ export interface Avd {
 }
 
 export interface Prerequisites {
+  backend: 'native' | 'docker'
+  backend_label?: string
+  docker_available?: boolean
+  kvm_available?: boolean
   sdk_root: string
   sdk_exists: boolean
   emulator_binary: boolean
   adb_binary: boolean
   cmdline_tools: boolean
   hw_accel: boolean
-  hw_accel_type: 'HVF' | 'KVM'
+  hw_accel_type: string
+  hw_accel_detail?: string
   platform: string
   arch: string
   avd_home: string

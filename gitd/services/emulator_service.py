@@ -6,6 +6,9 @@ Discovery helpers live in _emulator_helpers; pool logic in _emulator_pool.
 """
 
 import logging
+import os
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -23,6 +26,9 @@ from gitd.services._emulator_helpers import (
     _has_docker,
     _has_kvm,
     _run,
+    AVDMANAGER,
+    AVD_HOME,
+    EMULATOR_BIN,
     next_available_port,
 )
 from gitd.services._emulator_pool import EmulatorPool
@@ -43,34 +49,170 @@ class EmulatorManager:
     # ── Discovery ─────────────────────────────────────────────────────────
 
     def check_prerequisites(self) -> dict:
-        """Check Docker + KVM availability."""
+        """Check the selected backend and its platform-specific acceleration."""
         return _eh.check_prerequisites()
 
     def list_system_images(self) -> list[dict]:
-        """Return available Docker-based Android images."""
+        """Return the installed native SDK images or configured Docker image."""
         return _eh.list_system_images()
 
     def install_system_image(self, api_level: int, target: str = "google_apis_playstore", arch: str = "") -> dict:
-        """Pull the Docker emulator image."""
+        """Install a native SDK image or pull the configured Docker image."""
         return _eh.install_system_image(api_level, target, arch)
 
     def list_avds(self) -> list[dict]:
-        """List all ghost-labelled emulator containers."""
+        """List native AVDs or Docker-managed emulators."""
         return _eh.list_avds(self.list_running())
 
     def list_running(self) -> list[dict]:
-        """List running emulator containers reachable via ADB."""
+        """List emulators reachable through ADB on the selected backend."""
         return _eh.list_running(self._procs, self._lock)
+
+    def _next_native_port(self) -> int:
+        """Choose an unused even emulator console port (ADB requires even ports)."""
+        used = set()
+        for info in self.list_running():
+            match = re.fullmatch(r"emulator-(\d+)", info.get("serial", ""))
+            if match:
+                used.add(int(match.group(1)))
+        for port in range(5554, 5682, 2):
+            if port not in used:
+                return port
+        raise RuntimeError("No free Android Emulator console ports remain (5554–5680).")
+
+    def _native_create(self, config: EmulatorConfig) -> dict:
+        """Create a stopped SDK AVD; use installed images and device profiles."""
+        if not _eh._has_emulator() or not _eh._has_cmdline_tools():
+            return {"ok": False, "error": "Native Android SDK tools are incomplete; configure ANDROID_SDK_ROOT."}
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", config.name):
+            return {"ok": False, "error": "AVD name may contain only letters, numbers, dot, underscore, and hyphen."}
+        existing = {item["name"] for item in self.list_avds()}
+        if config.name in existing:
+            return {"ok": False, "error": f'Emulator "{config.name}" already exists.'}
+        avd_dir = AVD_HOME / f"{config.name}.avd"
+        if avd_dir.exists():
+            return {"ok": False, "error": f"AVD data folder already exists without registered metadata: {avd_dir}. Review or remove that orphan before recreating it."}
+
+        images = [item for item in _eh._native_system_images() if int(item["api_level"]) == config.api_level]
+        image = next((item for item in images if item["target"] == config.target), None)
+        if image is None and images:
+            # The form exposes API level; use an image actually installed for it
+            # rather than pretending the Docker-only Play Store image exists.
+            image = next((item for item in images if item["target"] == "google_apis_playstore"), images[0])
+        if image is None:
+            return {"ok": False, "error": f"No Android {config.api_level} system image is installed. Install one from System Images first."}
+
+        args = ["create", "avd", "-n", config.name, "-k", image["package"]]
+        if config.device_profile:
+            args += ["-d", config.device_profile]
+        try:
+            result = _eh._run_sdk_tool(AVDMANAGER, *args, timeout=180, check=False)
+            output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+            if result.returncode != 0:
+                self._remove_native_avd_artifacts(config.name)
+                return {"ok": False, "error": output[-1500:] or f"avdmanager exited {result.returncode}"}
+            config_path = AVD_HOME / f"{config.name}.avd" / "config.ini"
+            self._write_native_config(config_path, config)
+            return {
+                "ok": True,
+                "name": config.name,
+                "status": "stopped",
+                "backend": "native",
+                "system_image": image["package"],
+                "config": asdict(config),
+                "output": output[-1000:],
+            }
+        except Exception as exc:
+            try:
+                self._remove_native_avd_artifacts(config.name)
+            except Exception:
+                logger.exception("Could not clean partial AVD after failed creation: %s", config.name)
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _remove_native_avd_artifacts(name: str) -> None:
+        """Remove only this validated AVD's files, after its process is stopped."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            raise ValueError("Invalid AVD name")
+        root = AVD_HOME.resolve()
+        for candidate in (AVD_HOME / f"{name}.ini", AVD_HOME / f"{name}.avd"):
+            resolved = candidate.resolve()
+            if resolved.parent != root:
+                raise ValueError(f"Refusing to remove a path outside the AVD directory: {resolved}")
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            elif candidate.is_file():
+                candidate.unlink()
+
+    @staticmethod
+    def _write_native_config(path: Path, config: EmulatorConfig) -> None:
+        """Apply requested hardware dimensions without replacing other AVD settings."""
+        if not path.is_file():
+            raise FileNotFoundError(f"avdmanager did not create {path}")
+        width, height = (config.resolution.lower().split("x", 1) + [""])[:2]
+        updates = {
+            "hw.ramSize": str(max(1024, config.ram_mb)),
+            "hw.cpu.ncore": str(max(1, config.cores)),
+            "hw.lcd.width": width if width.isdigit() else "1080",
+            "hw.lcd.height": height if height.isdigit() else "2400",
+            "hw.lcd.density": str(max(120, config.dpi)),
+            "disk.dataPartition.size": f"{max(2048, config.disk_mb)}M",
+        }
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        seen = set()
+        updated = []
+        for line in lines:
+            key = line.split("=", 1)[0].strip() if "=" in line else ""
+            if key in updates:
+                updated.append(f"{key}={updates[key]}")
+                seen.add(key)
+            else:
+                updated.append(line)
+        updated.extend(f"{key}={value}" for key, value in updates.items() if key not in seen)
+        temp_path = path.with_suffix(".ini.tmp")
+        temp_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+
+    def _native_start(self, name: str, headless: bool = False, gpu: str = "auto", cold_boot: bool = False) -> dict:
+        """Launch a native AVD accelerated by the host platform (WHPX on Windows)."""
+        if name not in _eh._native_avd_names():
+            return {"ok": False, "error": f'AVD "{name}" not found. Create it first.'}
+        for running in self.list_running():
+            if running["name"] == name and running["adb_state"] in {"device", "offline"}:
+                return {"ok": True, "already_running": True, "name": name, "serial": running["serial"], "status": running["adb_state"]}
+
+        try:
+            port = self._next_native_port()
+            serial = f"emulator-{port}"
+            args = [str(EMULATOR_BIN), "-avd", name, "-port", str(port), "-accel", "on", "-gpu", gpu or "auto"]
+            if headless:
+                args.extend(["-no-window", "-no-audio", "-no-boot-anim"])
+            if cold_boot:
+                args.append("-no-snapshot-load")
+            kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(AVD_HOME.parent)}
+            if os.name == "nt":
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            else:
+                kwargs["start_new_session"] = True
+            process = subprocess.Popen(args, **kwargs)
+            self._procs[serial] = {"process": process, "name": name}
+            watcher = threading.Thread(target=self._wait_for_boot_and_setup, args=(serial, name), daemon=True)
+            watcher.start()
+            return {"ok": True, "name": name, "serial": serial, "pid": process.pid, "status": "booting", "backend": "native"}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not start native emulator: {exc}"}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     def create(self, config: EmulatorConfig) -> dict:
-        """Create (and start) a Docker-based Android emulator container.
+        """Create a native AVD or a Docker Android emulator container.
 
-        In Docker mode 'create' == 'create + start' because containers don't
-        have the AVD-vs-running distinction.  The container is started
-        immediately; boot polling happens in a background thread.
+        Native mode creates a stopped AVD, matching the Android SDK workflow.
+        Docker mode starts the container immediately because it has no separate
+        AVD creation step.
         """
+        if _eh.emulator_backend() == "native":
+            return self._native_create(config)
         if not _has_docker():
             return {
                 "ok": False,
@@ -147,7 +289,27 @@ class EmulatorManager:
             logger.error("Emulator %s (%s) boot/setup failed: %s", name, serial, e)
 
     def delete(self, name: str) -> dict:
-        """Stop and remove a Docker emulator container."""
+        """Stop and remove a native AVD or Docker emulator container."""
+        if _eh.emulator_backend() == "native":
+            running = next((item for item in self.list_running() if item["name"] == name), None)
+            if running:
+                stopped = self.stop(running["serial"])
+                if not stopped.get("ok"):
+                    return stopped
+            if name not in _eh._native_avd_names():
+                orphan = AVD_HOME / f"{name}.avd"
+                if orphan.exists():
+                    return {"ok": False, "error": f"AVD metadata is missing but data remains at {orphan}; inspect it before deleting."}
+                return {"ok": False, "error": f'AVD "{name}" not found.'}
+            try:
+                result = _eh._run_sdk_tool(AVDMANAGER, "delete", "avd", "-n", name, timeout=120, check=False)
+                output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+                if result.returncode != 0 and ((AVD_HOME / f"{name}.ini").exists() or (AVD_HOME / f"{name}.avd").exists()):
+                    return {"ok": False, "error": output[-1000:] or f"avdmanager exited {result.returncode}"}
+                self._remove_native_avd_artifacts(name)
+                return {"ok": True, "name": name}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
         # Disconnect ADB first if it was connected
         for info in self.list_running():
             if info["name"] == name and info.get("serial"):
@@ -172,12 +334,14 @@ class EmulatorManager:
         cold_boot: bool = False,
         extra_args: list[str] | None = None,
     ) -> dict:
-        """Start a stopped Docker emulator container.
+        """Start a stopped native AVD or Docker emulator container.
 
-        If the container doesn't exist yet, returns an error directing the
-        caller to use create() first.  In Docker mode headless/gpu/extra_args
-        are accepted for API compatibility but are no-ops.
+        If the AVD/container does not exist yet, returns an error directing the
+        caller to use create() first. Docker mode accepts headless/gpu/extra_args
+        for API compatibility; native mode passes the supported GPU/boot flags.
         """
+        if _eh.emulator_backend() == "native":
+            return self._native_start(name, headless=headless, gpu=gpu, cold_boot=cold_boot)
         if not _has_docker():
             return {"ok": False, "error": "Docker daemon not reachable."}
 
@@ -220,11 +384,34 @@ class EmulatorManager:
         }
 
     def stop(self, serial: str) -> dict:
-        """Stop a running emulator by its ADB serial (localhost:PORT).
+        """Stop a running emulator by its ADB serial.
 
-        Disconnects ADB and stops (but does not remove) the container so it
-        can be restarted quickly.
+        Stops (but does not remove) the native AVD/container so it can restart.
         """
+        if _eh.emulator_backend() == "native":
+            if not re.fullmatch(r"emulator-\d+", serial):
+                return {"ok": False, "error": f"Invalid native emulator serial: {serial}"}
+            result = _run([ADB_BIN, "-s", serial, "emu", "kill"], timeout=20, check=False)
+            process_entry = self._procs.pop(serial, None)
+            proc = process_entry.get("process") if isinstance(process_entry, dict) else process_entry
+            try:
+                if proc:
+                    proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+            except Exception:
+                pass
+            if result.returncode == 0 or "OK" in (result.stdout + result.stderr):
+                return {"ok": True, "serial": serial, "backend": "native"}
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=15)
+                    return {"ok": True, "serial": serial, "backend": "native"}
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return {"ok": True, "serial": serial, "backend": "native", "forced": True}
+            return {"ok": False, "serial": serial, "error": (result.stderr or result.stdout or "Emulator did not accept the stop command.")[-500:]}
         try:
             _run([ADB_BIN, "disconnect", serial], timeout=5, check=False)
         except Exception:
@@ -295,7 +482,9 @@ class EmulatorManager:
     # informative messages rather than hard errors so the API surface is intact.
 
     def snapshot_save(self, serial: str, name: str = "automation_ready") -> dict:
-        """Snapshot not supported in Docker mode — returns advisory message."""
+        """Save an emulator snapshot when using native AVDs."""
+        if _eh.emulator_backend() == "native":
+            return self._native_snapshot(serial, "save", name)
         return {
             "ok": False,
             "serial": serial,
@@ -304,7 +493,9 @@ class EmulatorManager:
         }
 
     def snapshot_load(self, serial: str, name: str = "automation_ready") -> dict:
-        """Snapshot not supported in Docker mode — returns advisory message."""
+        """Load an emulator snapshot when using native AVDs."""
+        if _eh.emulator_backend() == "native":
+            return self._native_snapshot(serial, "load", name)
         return {
             "ok": False,
             "serial": serial,
@@ -313,13 +504,26 @@ class EmulatorManager:
         }
 
     def list_snapshots(self, serial: str) -> dict:
-        """Snapshot not supported in Docker mode."""
+        """List snapshots from a native AVD or explain Docker's limitation."""
+        if _eh.emulator_backend() == "native":
+            result = _run([ADB_BIN, "-s", serial, "emu", "avd", "snapshot", "list"], timeout=20, check=False)
+            output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+            return {"ok": result.returncode == 0, "serial": serial, "output": output[-2000:], **({} if result.returncode == 0 else {"error": output[-500:]})}
         return {
             "ok": False,
             "serial": serial,
             "output": "",
             "error": "Snapshots are not supported in Docker emulator mode.",
         }
+
+    def _native_snapshot(self, serial: str, action: str, name: str) -> dict:
+        """Save or load a snapshot through the Android emulator console."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            return {"ok": False, "serial": serial, "error": "Snapshot name contains unsupported characters."}
+        result = _run([ADB_BIN, "-s", serial, "emu", "avd", "snapshot", action, name], timeout=60, check=False)
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        ok = result.returncode == 0 and "KO:" not in output
+        return {"ok": ok, "serial": serial, "snapshot": name, "output": output[-1500:], **({} if ok else {"error": output[-500:] or f"Snapshot {action} failed."})}
 
     # ── Internals ──────────────────────────────────────────────────────────
 
